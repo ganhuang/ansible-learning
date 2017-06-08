@@ -1,0 +1,49 @@
+---
+- set_fact:
+    work_dir: "{{ lookup('env', 'WORKSPACE')  if lookup('env', 'WORKSPACE') != '' else lookup('env', 'HOME') }}"
+    repo_id: "{{ lookup('pipe','date +%Y%m%d%H%M%S') }}"
+
+- name: Configure yum repo on slave
+  become: true
+  template:
+    src: yum_slave_repo.j2
+    dest: /etc/yum.repos.d/jenkins-slave-{{ repo_id }}.repo
+  notify: refresh cache
+
+- name: Ensure yum-utils is installed
+  become: true
+  action: "{{ ansible_pkg_mgr }} name=yum-utils state=present"
+
+- name: Set repoquery command
+  set_fact:
+    repoquery_cmd: "{{ 'dnf repoquery --latest-limit 1 -d 0' if ansible_pkg_mgr == 'dnf' else 'repoquery --plugins' }}"
+
+- name: Get current installed Ansible version
+  command: "{{ repoquery_cmd }} --installed --qf '%{version}-%{release}' ansible"
+  register: curr_ansible_version
+  changed_when: false
+  ignore_errors: yes
+
+- name: Get available Ansible version from the specified repo
+  command: "{{ repoquery_cmd }}  --repoid={{ repo_id }} --qf '%{version}-%{release}' ansible"
+  register: avail_ansible_version
+  changed_when: false
+  ignore_errors: yes
+  until: avail_ansible_version.stdout != ""
+
+- name: Remove repo file if installed ansible is not what we desire
+  become: true
+  file: path=/etc/yum.repos.d/jenkins-slave-{{ repo_id }}.repo state=absent
+  when: (curr_ansible_version.stdout != avail_ansible_version.stdout) and (not force_install |default (False) | bool)
+
+- set_fact:
+    required_ansible_version: "{{ avail_ansible_version.stdout.split('-')[:-1] |join }}"
+    installed_ansible_version: "{{ curr_ansible_version.stdout.split('-')[:-1] |join }}" 
+  when: (curr_ansible_version.stdout != avail_ansible_version.stdout) and (not force_install |default (False) | bool)
+
+- fail:
+    msg: "\n The ansible version on this slave is {{ installed_ansible_version }}. But the required ansible version in puddle is {{ required_ansible_version }}. \n\n Two options for you: \n 1)(Recommended) Choose the corresponding JENKINS_SLAVE_LABEL: ansible-{{ required_ansible_version }} \n 2) set 'force_install: true' in LAUNCHER_VARS to ignore the ansible version checking"
+  when: (curr_ansible_version.stdout != avail_ansible_version.stdout) and (not force_install |default (False) | bool)
+
+- name: Download openshift ansible rpms
+  include: download_rpms.yaml

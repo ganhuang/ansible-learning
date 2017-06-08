@@ -1,0 +1,90 @@
+---
+- name: Remove openshift_playbook_rpm_repo cache files
+  become: true
+  shell: rm -rf /var/cache/yum/x86_64/*/{{ repo_id }} ; rm -rf /var/cache/dnf/x86_64/*/{{ repo_id }}* ; rm -rf /var/cache/dnf/{{ repo_id }}*;  rm -rf /var/lib/yum/repos/x86_64/*/{{ repo_id }}
+  ignore_errors: yes
+
+- name: Delete the existing openshift-ansible rpm packages
+  shell: rm -rf openshift-ansible*
+  args:
+    chdir: "{{ work_dir }}"
+
+- name: Download the openshift-ansible via dnf
+  command: "{{ ansible_pkg_mgr }} download --destdir '{{ work_dir }}' --disablerepo=* --enablerepo={{ repo_id }} openshift-ansible*"
+  args:
+    chdir: "{{ work_dir }}"
+  register: dnf_download_rpm_result
+  when: ansible_pkg_mgr == "dnf"
+  ignore_errors: yes
+
+- name: Download the openshift-ansible via yumdownloader
+  command: "yumdownloader --disablerepo=* --enablerepo={{ repo_id }} openshift-ansible*"
+  args:
+    chdir: "{{ work_dir }}"
+  register: yum_download_rpm_result
+  when: ansible_pkg_mgr == "yum"
+  ignore_errors: yes
+
+- name: Remove repo file 
+  become: true
+  file: path=/etc/yum.repos.d/jenkins-slave-{{ repo_id }}.repo state=absent
+
+- name: Exit due to fail to download openshift-ansible rpm package
+  fail: msg="fail to download rpm pakcage"
+  when: (dnf_download_rpm_result | failed) or (yum_download_rpm_result | failed)
+
+- name: List all openshift ansible packages
+  shell: ls openshift-ansible*.rpm
+  args:
+    chdir: "{{ work_dir }}"
+  register: packages  
+
+- name: Delete the directory of playbook
+  file: 
+    path: "{{ work_dir }}/private-openshift-ansible"
+    state: absent
+
+- name: Delete the directory of rpms
+  file: 
+    path: "{{ work_dir }}/usr"
+    state: absent
+
+- set_fact:
+    ansible_package: "{{ packages.stdout.split(\"\n\") | default([]) }}"
+
+- name: untar the rpm package
+  shell: "rpm2cpio {{item}}|cpio -id"
+  args:
+    chdir: "{{ work_dir }}"
+  with_items: "{{ ansible_package | default([]) }}"
+  
+- name: create openshift ansible directory
+  file: 
+    state: directory
+    path: "{{ work_dir }}/private-openshift-ansible"
+
+- name: mv openshift-ansible rpm plugins 
+  shell: mv ./usr/share/ansible_plugins/* ./usr/share/ansible/openshift-ansible/
+  args:
+    chdir: "{{ work_dir }}"
+
+- name: copy openshift-ansible rpm playbooks
+  shell: cp -rf ./usr/share/ansible/openshift-ansible/* ./private-openshift-ansible/
+  args:
+    chdir: "{{ work_dir }}"
+
+- name: create correct symbol link for openshift-ansible plugin
+  file:
+    src: '{{ item.src }}'
+    dest: '{{ item.dest }}'
+    state: link
+    force: yes
+  with_items:
+    - { src: '../../../filter_plugins/oo_filters.py', dest: '{{ work_dir }}/private-openshift-ansible/roles/openshift_master_facts/filter_plugins/oo_filters.py' }
+    - { src: '../../../lookup_plugins/oo_option.py', dest: '{{ work_dir }}/private-openshift-ansible/roles/openshift_master_facts/lookup_plugins/oo_option.py' }
+
+#- name: create ansible.cfg to specify the path of plugins
+#  template:
+#    src: ansible.cfg.j2
+#    dest: "{{ work_dir }}/ansible.cfg"
+#    force: yes
